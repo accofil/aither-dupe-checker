@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+export PATH=/usr/local/bin:/usr/bin:/bin
+
+cd -- /home/accofil/aither-dupe-checker
+exec /home/accofil/aithercheck-venv/bin/python \
+  /home/accofil/aither-dupe-checker/aither_check.py "$@"

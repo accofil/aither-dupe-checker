@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "overrides": {
+    "reallegend": {
+      "match": {
+        "evidence_type": "disc_manifest",
+        "disc_manifest_kind": "BDMV",
+        "disc_manifest_fingerprint": "9f5a95a9b4733e9e26a50bc38063a83201a63c985a96747a9d23a1f14d4b8585",
+        "disc_total_size": 23634435708
+      },
+      "identity": {
+        "tmdb_id": 37034,
+        "imdb_id": "tt1425257",
+        "media_type": "movie",
+        "title": "True Legend",
+        "year": 2010
+      }
+    },
+    "thewomeninwhites011080pdtshdma51avcremuxframestor": {
+      "match": {
+        "evidence_type": "media_payload",
+        "media_payload_signature": [
+          {"extension": "mkv", "size": 11420395120},
+          {"extension": "mkv", "size": 11690022987},
+          {"extension": "mkv", "size": 12135574165},
+          {"extension": "mkv", "size": 13402504377},
+          {"extension": "mkv", "size": 26958045362}
+        ],
+        "torrent_file_count": 5,
+        "disc_total_size": 75606542011,
+        "torrent_infohash": "29836c21876387e43c358aab288c4ba586ecf6d0"
+      },
+      "identity": {
+        "tmdb_id": 79012,
+        "imdb_id": "tt6036728",
+        "media_type": "tv",
+        "title": "The Woman in White",
+        "year": 2018
+      },
+      "payload_review": {
+        "required": true,
+        "manual_reason": "OVERLAPPING_EPISODE_PAYLOAD"
+      }
+    }
+  }
+}

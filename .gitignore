@@ -1,0 +1,6 @@
+.env
+*.log
+*.json
+!identity_overrides.json
+__pycache__/
+*.pyc
