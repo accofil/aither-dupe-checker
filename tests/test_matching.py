@@ -2268,7 +2268,7 @@ class TechnicalMatchingTests(unittest.TestCase):
             TechnicalDecision.INDETERMINATE,
         )
 
-    def test_material_marker_difference_vetoes_exact_group_payload(self):
+    def test_material_marker_difference_vetoes_different_payload(self):
         for marker in ("HYBRID", "CUSTOM"):
             with self.subTest(marker=marker):
                 local_name = (
@@ -2284,13 +2284,68 @@ class TechnicalMatchingTests(unittest.TestCase):
                     "Feature.2024.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC-TEAM",
                     resolution="2160p",
                     release_type="Remux",
-                    files=[{"name": "Feature.mkv", "size": 1_000}],
+                    files=[{"name": "Feature.mkv", "size": 1_001}],
                 )
 
                 self.assertIs(
                     technical_decision(local, remote),
                     TechnicalDecision.NO_MATCH,
                 )
+
+    def test_material_marker_does_not_hide_byte_identical_group_payload(self):
+        # Real case: Aither lists the FraMeSToR HYBRID remux without the
+        # HYBRID word in the title, but the media bytes are identical.
+        for marker in ("HYBRID", "CUSTOM"):
+            with self.subTest(marker=marker):
+                local_name = (
+                    f"Feature.2024.{marker}.2160p.UHD.BluRay.REMUX.DV.HEVC-TEAM"
+                )
+                local = enrich_release(
+                    parse_release(local_name),
+                    local_name,
+                    {},
+                    [{"name": "Feature.mkv", "size": 1_000}],
+                )
+                remote = candidate(
+                    "Feature.2024.2160p.UHD.BluRay.REMUX.DV.HEVC-TEAM",
+                    resolution="2160p",
+                    release_type="Remux",
+                    files=[{"name": "Feature.mkv", "size": 1_000}],
+                )
+
+                self.assertIs(
+                    technical_decision(local, remote), TechnicalDecision.MATCH
+                )
+
+    def test_sample_files_are_not_part_of_the_media_payload(self):
+        name = "Show.S01E01.1080p.WEB.H264-GRP"
+        local = enrich_release(
+            parse_release(name),
+            name,
+            {},
+            [
+                {"name": f"{name}/Sample/show.s01e01-sample.mkv", "size": 33},
+                {"name": f"{name}/show.s01e01.mkv", "size": 1_000},
+                {"name": f"{name}/show.s01e01.nfo", "size": 2},
+            ],
+        )
+        self.assertEqual(local["media_payload_signature"], (("mkv", 1_000),))
+        self.assertEqual(local["media_file_sizes"], (1_000,))
+
+    def test_console_game_scene_releases_are_blacklisted(self):
+        for name in (
+            "EA.SPORTS.FC.27.PS5-DUPLEX",
+            "EA_SPORTS_FC_27_Update_v1.8d.310c_NSW-VENOM",
+            "NBA.2K27.PS5-DUPLEX",
+        ):
+            with self.subTest(name=name):
+                blacklisted, _, rule, _ = is_blacklisted_release(name)
+                self.assertTrue(blacklisted)
+                self.assertEqual(rule, "GAME:CONSOLE_SCENE")
+        blacklisted, _, _, _ = is_blacklisted_release(
+            "Switch.2024.1080p.BluRay.x264-GRP"
+        )
+        self.assertFalse(blacklisted)
 
     def test_matching_hybrid_markers_allow_exact_group_payload_match(self):
         local_name = "Feature.2024.HYBRID.2160p.UHD.BluRay.REMUX.DV.HEVC-TEAM"

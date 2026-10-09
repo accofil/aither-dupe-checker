@@ -75,6 +75,14 @@ _ADULT_XXX_TOKEN_RE = re.compile(
 _SCENE_DATE_RE = re.compile(
     r"(?<!\d)(\d{2})[._-](\d{2})[._-](\d{2})(?!\d)"
 )
+_CONSOLE_GAME_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(?:ps[2-5]|psp|psvita|nsw|switch|xbox360|xboxone|"
+    r"xbox|wiiu|wii|nds|3ds)-[a-z0-9]+$"
+)
+_VIDEO_RELEASE_TOKEN_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(?:\d{3,4}[pi]|2160p|bluray|blu-ray|web-?dl|webrip|"
+    r"hdtv|dvdrip|remux|uhd)(?![a-z0-9])"
+)
 _INDYCAR_RE = re.compile(
     r"(?<![A-Za-z0-9])INDY[ ._-]?CAR(?![A-Za-z0-9])", re.IGNORECASE
 )
@@ -590,6 +598,16 @@ def _manifest_details(
     return digest.hexdigest(), len(entries), total_size, main_size
 
 
+def _is_sample_file(name: str) -> bool:
+    """Scene Sample/ folders and *-sample.* clips are not upload payload."""
+
+    path = name.replace("\\", "/").casefold()
+    parts = path.split("/")
+    if any(part == "sample" or part == "samples" for part in parts[:-1]):
+        return True
+    return bool(re.search(r"(?:^|[._ -])sample\.[a-z0-9]{2,4}$", parts[-1]))
+
+
 def enrich_release(
     parsed: Mapping[str, Any],
     name: str,
@@ -685,6 +703,7 @@ def enrich_release(
             size,
         )
         for item in files
+        if not _is_sample_file(_file_name(item))
         if (match := _PAYLOAD_EXTENSION_RE.search(_file_name(item)))
         if (size := _file_size(item)) is not None
     )
@@ -893,6 +912,10 @@ def _content_blacklist_rule(name: str) -> str:
 
     if _INDYCAR_RE.search(name) and _SPORT_ROUND_RE.search(name):
         return "SPORT:INDYCAR_ROUND"
+
+    stem = _strip_media_extension(name)
+    if _CONSOLE_GAME_RE.search(stem) and not _VIDEO_RELEASE_TOKEN_RE.search(stem):
+        return "GAME:CONSOLE_SCENE"
 
     if _MLS_LEAGUES_CUP_RE.search(name) and _VERSUS_TOKEN_RE.search(name):
         return "SPORT:MLS_LEAGUES_CUP_VS"
@@ -2246,6 +2269,24 @@ def _disc_distributors(value: Any) -> tuple[str, ...]:
     )
 
 
+def _exact_group_payload_match(
+    parsed: Mapping[str, Any], attrs: Mapping[str, Any]
+) -> bool:
+    """Same release group and byte-identical media payload (names may differ)."""
+
+    local_group = extract_release_group(str(parsed.get("name") or "")).casefold()
+    remote_group = extract_release_group(str(attrs.get("name") or "")).casefold()
+    if not local_group or local_group != remote_group:
+        return False
+    local_sizes = _local_media_file_sizes(parsed)
+    if not local_sizes or local_sizes != _remote_media_file_sizes(attrs):
+        return False
+    local_signature = _local_media_payload_signature(parsed)
+    return bool(
+        local_signature and local_signature == _remote_media_payload_signature(attrs)
+    )
+
+
 def _same_release_payload_identity(
     parsed: Mapping[str, Any],
     attrs: Mapping[str, Any],
@@ -2815,7 +2856,9 @@ def technical_decision(
 
     local_material = _material_markers(parsed.get("name"))
     remote_material = _material_markers(remote_name)
-    if local_material != remote_material:
+    if local_material != remote_material and not _exact_group_payload_match(
+        parsed, attrs
+    ):
         return TechnicalDecision.NO_MATCH
 
     local_languages = _language_markers(parsed.get("name"))
