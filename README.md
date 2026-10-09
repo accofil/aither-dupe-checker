@@ -83,7 +83,7 @@ A teljes előzmény `previous_decision` alatt auditálható marad.
 aither
 ```
 
-Nincs cron vagy systemd időzítő; a program kizárólag kézzel indul.
+Nincs cron vagy systemd időzítő; a program kizárólag kézzel indul (`aither`, riporthoz: `aither --report`).
 
 ## RAR és ISO feldolgozás
 
@@ -107,6 +107,37 @@ Az archívumokat a program előbb teszteli és üres staging területre bontja.
 Abszolút/`..` útvonal, symlink, speciális fájl, hiányos RAR-készlet, elégtelen
 hely, célütközés vagy bizonytalan qBittorrent-tulajdonlás esetén az eredeti
 érintetlen marad. RAR-ból kibontott ISO-t ugyanabban a tranzakcióban bont tovább.
+
+## Riport és magyarázat
+
+```bash
+aither --report              # táblázat minden döntésről, hálózati kérés nélkül
+aither --explain Moana       # részletes nézet: azonosítók, a talált Aither-torrent, az ok
+```
+
+Minden normál futás végén a program kiírja a figyelmet igénylő tételeket
+(`NOT_FOUND`, `MANUAL`, `UNRESOLVED`, `RECHECK_REQUIRED`), és az aktuális qB-lista
+teljes riportját `aither_report.tsv` néven a kész lista mellé menti.
+
+## Beállítható viselkedés
+
+- `AITHER_WEB_POLICY=distinct-group` (a `~/.aithercheck.env`-ben, alapértelmezés:
+  `strict`): ha mindkét oldal WEB-DL/WEBRip, azonos felbontású, a release-csoport
+  eltér és a médiafájl bájtméretei is eltérnek, az Aither-jelölt nem dupe. Csak akkor
+  kapcsold be, ha a tracker szabályai engedik több csoport WEB-DL-jét ugyanarra az
+  epizódra. Alapból ezek `MANUAL` státuszt kapnak.
+
+## Azonosítás finomságai
+
+- Sorozatnál, ha a cím nem egyértelmű, az dönt, hogy melyik pontos című TMDb-sorozatnak
+  van meg a kért évad/epizódja (és az opcionális országjelölő, pl. `The.Floor.US`,
+  egyezik-e az eredeti országgal). Ha két mű is rendelkezik vele, a release
+  `UNRESOLVED` marad.
+- A `Sample/` mappák és a `*-sample.*` klipek nem számítanak a feltöltött payloadnak.
+- Konzoljáték scene release-ek (`PS5-`, `NSW-`, `XBOX…`, `PS4-` stb. végződés, videó
+  jelző nélkül) `BLACKLISTED` (`GAME:CONSOLE_SCENE`) státuszt kapnak.
+- Azonos release-csoport és bájtra azonos médiafájl-méretek esetén a `HYBRID`/`CUSTOM`
+  cím-jelölő hiánya az Aither-címben nem akadályozza a dupe-felismerést.
 
 ## Állományok
 

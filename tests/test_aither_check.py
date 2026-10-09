@@ -5731,5 +5731,94 @@ class ScanAndClientSafetyTests(unittest.TestCase):
         self.assertNotIn("TOP-SECRET", str(caught.exception))
 
 
+class TmdbSeasonEpisodeIdentityTests(unittest.TestCase):
+    @staticmethod
+    def _client(pages, owners):
+        """pages: list of result lists, one per TMDb search page."""
+
+        total = sum(len(page) for page in pages)
+
+        class Tmdb(TmdbClient):
+            def __init__(inner):
+                pass
+
+            def _get_json(inner, url, params):
+                if "/search/tv" in url:
+                    number = int(params.get("page", 1))
+                    return {
+                        "page": number,
+                        "total_pages": len(pages),
+                        "total_results": total,
+                        "results": pages[number - 1],
+                    }
+                for tmdb_id in owners:
+                    if f"/tv/{tmdb_id}/season/" in url:
+                        season, episode = [
+                            int(part)
+                            for part in url.split("/season/")[1].split("/episode/")
+                        ]
+                        return {"season_number": season, "episode_number": episode}
+                raise ProviderError("TMDb HTTP hiba: 404")
+
+        return Tmdb()
+
+    @staticmethod
+    def _show(tmdb_id, name, country):
+        return {
+            "id": tmdb_id,
+            "name": name,
+            "original_name": name,
+            "origin_country": [country],
+        }
+
+    @staticmethod
+    def _tv(title, season, episode):
+        return {
+            "title": title,
+            "media_type": "tv",
+            "season": season,
+            "episode": episode,
+            "scope": "episode",
+            "year": None,
+        }
+
+    def test_country_tag_and_season_owner_resolve_same_named_show(self):
+        pages = [[self._show(1, "The Floor", "US"), self._show(2, "The Floor", "NL")]]
+        identity = self._client(pages, owners=[1]).search(self._tv("The Floor US", 6, 3))
+        self.assertEqual(identity["tmdb_id"], 1)
+
+    def test_owner_on_a_later_search_page_is_found(self):
+        pages = [
+            [self._show(1, "Hit the Floor", "US")],
+            [self._show(2, "The Floor", "US"), self._show(3, "The Floor", "NL")],
+        ]
+        identity = self._client(pages, owners=[2]).search(self._tv("The Floor US", 6, 3))
+        self.assertEqual(identity["tmdb_id"], 2)
+
+    def test_too_many_search_pages_stay_unresolved(self):
+        pages = [[self._show(10 + n, "Other", "US")] for n in range(4)]
+        pages[3].append(self._show(99, "The Floor", "US"))
+        self.assertIsNone(
+            self._client(pages, owners=[99]).search(self._tv("The Floor", 6, 3))
+        )
+
+    def test_single_season_owner_resolves_without_country_tag(self):
+        pages = [[self._show(10, "Asia Express", "RO"), self._show(11, "Asia Express", "CZ")]]
+        identity = self._client(pages, owners=[10]).search(self._tv("Asia Express", 7, 19))
+        self.assertEqual(identity["tmdb_id"], 10)
+
+    def test_two_season_owners_stay_unresolved(self):
+        pages = [[self._show(20, "El Circulo", "MX"), self._show(21, "El Circulo", "CO")]]
+        self.assertIsNone(
+            self._client(pages, owners=[20, 21]).search(self._tv("El Circulo", 1, 1))
+        )
+
+    def test_non_exact_title_is_never_a_candidate(self):
+        pages = [[self._show(30, "Hit the Floor", "US")]]
+        self.assertIsNone(
+            self._client(pages, owners=[30]).search(self._tv("The Floor", 1, 1))
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

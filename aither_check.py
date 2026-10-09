@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from report import ATTENTION, format_table, report_rows, write_tsv
 from matching import (
     TechnicalDecision,
     _audio_evidence,
@@ -78,7 +79,7 @@ DECISION_VERSION = 4
 QUERY_POLICY_VERSION = 3
 AITHER_EVIDENCE_SCHEMA_VERSION = 3
 MATCHER_VERSION = 3
-IDENTITY_RESOLVER_VERSION = 2
+IDENTITY_RESOLVER_VERSION = 3
 AUTOMATIC_IDENTITY_RECHECK_REASON = "IDENTITY_RESOLVER_PRE_AITHER_RECHECK"
 
 
@@ -383,6 +384,15 @@ class QbitClient:
         self._post_hashes("torrents/delete", hashes, deleteFiles="false")
 
 
+_TITLE_COUNTRY_SUFFIX_RE = re.compile(
+    r"^(?P<base>.+?)[ ._-]+(?P<country>US|UK|GB|AU|NZ|CA|IE|DE|FR|NL|ES|IT|PL|"
+    r"SE|NO|DK|FI|JP|KR)$",
+    re.IGNORECASE,
+)
+_COUNTRY_ALIASES = {"UK": "GB"}
+_SEASON_EPISODE_MAX_SEARCH_PAGES = 3
+
+
 class TmdbClient:
     def __init__(self, api_key: str, *, timeout: float = 30.0) -> None:
         self.api_key = api_key
@@ -507,6 +517,111 @@ class TmdbClient:
         cache[cache_key] = dict(identity)
         return identity
 
+    def _identity_from_season_episode(
+        self, title: str, parsed: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Resolve a same-named TV show by which candidate has this S/E.
+
+        Only an exact (canonical) title match is considered, an optional
+        trailing country tag (``The.Floor.US``) must match the show's origin
+        country, and exactly one candidate may own the requested season and
+        episode on TMDb.  Two or more owners stay unresolved.
+        """
+
+        if parsed.get("media_type") != "tv" or _safe_year(parsed.get("year")) is not None:
+            return None
+        season, episode = parsed.get("season"), parsed.get("episode")
+        if (
+            isinstance(season, bool)
+            or isinstance(episode, bool)
+            or not isinstance(season, int)
+            or not isinstance(episode, int)
+            or season < 0
+            or episode < 1
+            or parsed.get("scope") not in {None, "episode"}
+        ):
+            return None
+        base, country = title.strip(), None
+        match = _TITLE_COUNTRY_SUFFIX_RE.match(base)
+        if match:
+            base = match.group("base").strip()
+            country = match.group("country").upper()
+            country = _COUNTRY_ALIASES.get(country, country)
+        wanted = canonical_title(base)
+        if not wanted:
+            return None
+        results: list[Any] = []
+        page_number, total_pages, total_results = 1, 1, None
+        while page_number <= total_pages:
+            payload = self._get_json(
+                "https://api.themoviedb.org/3/search/tv",
+                {"query": base, "language": "en-US", "page": page_number},
+            )
+            page_results = payload.get("results")
+            reported_pages = payload.get("total_pages")
+            if (
+                not isinstance(page_results, list)
+                or payload.get("page") != page_number
+                or isinstance(reported_pages, bool)
+                or not isinstance(reported_pages, int)
+                or not 0 <= reported_pages <= _SEASON_EPISODE_MAX_SEARCH_PAGES
+            ):
+                return None
+            total_pages = max(reported_pages, 1)
+            total_results = payload.get("total_results")
+            results.extend(page_results)
+            page_number += 1
+        # Every page must have been read: a title owner hidden on an unread
+        # page would otherwise make a sole owner look unique.
+        if total_results != len(results):
+            return None
+        eligible: dict[int, Mapping[str, Any]] = {}
+        for item in results:
+            if not isinstance(item, Mapping) or item.get("id") is None:
+                continue
+            names = {
+                canonical_title(str(value))
+                for value in (item.get("name"), item.get("original_name"))
+                if value
+            }
+            if wanted not in names:
+                continue
+            if country is not None:
+                origins = {str(v).upper() for v in item.get("origin_country") or ()}
+                if country not in origins:
+                    continue
+            try:
+                eligible[int(item["id"])] = item
+            except (TypeError, ValueError):
+                continue
+        if not 1 <= len(eligible) <= 8:
+            return None
+        owners: list[int] = []
+        for tmdb_id in eligible:
+            try:
+                episode_payload = self._get_json(
+                    "https://api.themoviedb.org/3/tv/"
+                    f"{tmdb_id}/season/{season}/episode/{episode}",
+                    {"language": "en-US"},
+                )
+            except ProviderError as exc:
+                if str(exc) == "TMDb HTTP hiba: 404":
+                    continue
+                raise
+            if (
+                episode_payload.get("season_number") in {None, season}
+                and episode_payload.get("episode_number") in {None, episode}
+            ):
+                owners.append(tmdb_id)
+        if len(owners) != 1:
+            return None
+        item = eligible[owners[0]]
+        return {
+            "tmdb_id": owners[0],
+            "media_type": "tv",
+            "title": item.get("name") or base,
+        }
+
     def _get_json(self, url: str, params: Mapping[str, Any]) -> dict[str, Any]:
         safe_params = {**params, "api_key": self.api_key}
         try:
@@ -629,6 +744,8 @@ class TmdbClient:
                     "media_type": endpoint,
                     "title": item.get("title") or item.get("name") or title,
                 }
+        if preferred == "tv":
+            return self._identity_from_season_episode(title, parsed)
         return None
 
     def alternative_titles(self, media_type: str, tmdb_id: int) -> tuple[str, ...]:
@@ -4740,12 +4857,34 @@ def print_summary(summary: ScanSummary, store: StateStore, ready_file: Path) -> 
     print(f"feldolgozásra váró RAR/ISO: {pending}")
     print(f"kész lista: {ready_file}")
 
+    snapshot = store.snapshot()
+    live_rows = report_rows(snapshot, only_keys=summary.live_keys)
+    report_path = ready_file.with_name("aither_report.tsv")
+    try:
+        write_tsv(live_rows, report_path)
+        print(f"teljes riport (TSV): {report_path}")
+    except OSError as exc:
+        print(f"FIGYELEM: a riport nem írható: {exc}", file=sys.stderr)
+    attention = [row for row in live_rows if row["status"] in ATTENTION]
+    if attention:
+        print("\n=== Figyelmet igénylő tételek (részletek: aither --explain) ===")
+        print(format_table(attention))
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    report_mode = False
+    needle = ""
     if argv:
-        print("Használat: aither", file=sys.stderr)
-        return 2
+        if argv[0] in {"--explain", "--report"}:
+            report_mode = True
+            needle = " ".join(argv[1:])
+        else:
+            print(
+                "Használat: aither [--report | --explain [névrészlet]]",
+                file=sys.stderr,
+            )
+            return 2
 
     os.umask(0o077)
     from dotenv import load_dotenv
@@ -4757,6 +4896,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # StateStore may migrate and atomically rewrite a legacy file in
             # its constructor, so the process lock must already be held.
             store = StateStore(config.state_file)
+            if report_mode:
+                rows = report_rows(store.snapshot(), needle=needle)
+                print(format_table(rows, verbose=bool(argv[0] == "--explain")))
+                print(f"\n{len(rows)} tétel (hálózati kérés nélkül)")
+                return 0
             try:
                 identity_overrides = load_identity_overrides(
                     config.identity_overrides_file

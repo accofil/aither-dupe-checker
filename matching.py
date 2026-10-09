@@ -2287,6 +2287,48 @@ def _exact_group_payload_match(
     )
 
 
+def web_distinct_group_policy_enabled() -> bool:
+    """Operator opt-in: AITHER_WEB_POLICY=distinct-group (default: strict)."""
+
+    return os.environ.get("AITHER_WEB_POLICY", "strict").strip().casefold() in {
+        "distinct-group",
+        "distinct_group",
+    }
+
+
+def _distinct_web_release(
+    parsed: Mapping[str, Any],
+    attrs: Mapping[str, Any],
+    *,
+    local_type: str | None,
+    remote_type: str | None,
+    local_resolution: str | None,
+    remote_resolution: str | None,
+) -> bool:
+    """WEB-DL from another group with different bytes is a separate release.
+
+    Applies only when the operator opted in, both sides are WEB-DL/WEBRip of
+    the same known resolution, both release groups are known and different,
+    and both byte-exact payload vectors are known and different.  The
+    tracker's own catalogue showing several groups' WEB-DLs for one
+    service/resolution is what justifies the opt-in; it is never the default.
+    """
+
+    if not web_distinct_group_policy_enabled():
+        return False
+    if local_type not in {"WEB-DL", "WEBRip"} or local_type != remote_type:
+        return False
+    if not local_resolution or local_resolution != remote_resolution:
+        return False
+    local_group = extract_release_group(str(parsed.get("name") or "")).casefold()
+    remote_group = extract_release_group(str(attrs.get("name") or "")).casefold()
+    if not local_group or not remote_group or local_group == remote_group:
+        return False
+    local_sizes = _local_media_file_sizes(parsed)
+    remote_sizes = _remote_media_file_sizes(attrs)
+    return bool(local_sizes and remote_sizes and local_sizes != remote_sizes)
+
+
 def _same_release_payload_identity(
     parsed: Mapping[str, Any],
     attrs: Mapping[str, Any],
@@ -3025,6 +3067,15 @@ def technical_decision(
             return TechnicalDecision.NO_MATCH
         indeterminate |= unknown
 
+    if indeterminate and _distinct_web_release(
+        parsed,
+        attrs,
+        local_type=local_type,
+        remote_type=remote_type,
+        local_resolution=local_resolution,
+        remote_resolution=remote_resolution,
+    ):
+        return TechnicalDecision.NO_MATCH
     return (
         TechnicalDecision.INDETERMINATE
         if indeterminate

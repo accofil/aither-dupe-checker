@@ -2347,6 +2347,45 @@ class TechnicalMatchingTests(unittest.TestCase):
         )
         self.assertFalse(blacklisted)
 
+    def test_distinct_group_web_policy_is_opt_in(self):
+        import os
+
+        name = "Show.S01E01.1080p.WEB.H264-NEWGRP"
+        local = enrich_release(
+            parse_release(name),
+            name,
+            {},
+            [{"name": "Show.S01E01.mkv", "size": 1_000}],
+        )
+        remote = candidate(
+            "Show S01E01 1080p AMZN WEB-DL DD+ 5.1 H.264-OTHER",
+            resolution="1080p",
+            release_type="WEB-DL",
+            files=[{"name": "Show.S01E01.mkv", "size": 2_000}],
+        )
+        previous = os.environ.pop("AITHER_WEB_POLICY", None)
+        try:
+            self.assertIsNot(
+                technical_decision(local, remote), TechnicalDecision.NO_MATCH
+            )
+            os.environ["AITHER_WEB_POLICY"] = "distinct-group"
+            self.assertIs(
+                technical_decision(local, remote), TechnicalDecision.NO_MATCH
+            )
+            same_group = candidate(
+                "Show S01E01 1080p AMZN WEB-DL DD+ 5.1 H.264-NEWGRP",
+                resolution="1080p",
+                release_type="WEB-DL",
+                files=[{"name": "Show.S01E01.mkv", "size": 2_000}],
+            )
+            self.assertIsNot(
+                technical_decision(local, same_group), TechnicalDecision.NO_MATCH
+            )
+        finally:
+            os.environ.pop("AITHER_WEB_POLICY", None)
+            if previous is not None:
+                os.environ["AITHER_WEB_POLICY"] = previous
+
     def test_matching_hybrid_markers_allow_exact_group_payload_match(self):
         local_name = "Feature.2024.HYBRID.2160p.UHD.BluRay.REMUX.DV.HEVC-TEAM"
         local = enrich_release(
