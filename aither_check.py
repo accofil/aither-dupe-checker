@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from archive_manifest import expand_archive_manifest
 from report import ATTENTION, format_table, report_rows, write_tsv
 from matching import (
     TechnicalDecision,
@@ -78,7 +79,7 @@ CATEGORY_IDS = {"movie": 1, "tv": 2}
 DECISION_VERSION = 4
 QUERY_POLICY_VERSION = 3
 AITHER_EVIDENCE_SCHEMA_VERSION = 3
-MATCHER_VERSION = 3
+MATCHER_VERSION = 4
 IDENTITY_RESOLVER_VERSION = 3
 AUTOMATIC_IDENTITY_RECHECK_REASON = "IDENTITY_RESOLVER_PRE_AITHER_RECHECK"
 
@@ -979,6 +980,8 @@ _AITHER_EVIDENCE_FIELDS = frozenset(
         "manifest_fingerprint",
         "disc_manifest_version",
         "disc_manifest_kind",
+        "internal",
+        "trumpable",
     }
 )
 
@@ -996,6 +999,7 @@ _AITHER_VALIDATED_EVIDENCE_FIELDS = frozenset(
         "disc_editions", "disc_manifest_fingerprint",
         "bdmv_manifest_fingerprint", "manifest_fingerprint",
         "disc_manifest_version", "disc_manifest_kind",
+        "internal", "trumpable",
     }
 )
 
@@ -4091,6 +4095,33 @@ class ScanSummary:
     live_keys: tuple[str, ...] = ()
 
 
+def _manifest_files(
+    torrent: Mapping[str, Any],
+    files: Sequence[Mapping[str, Any]],
+    *,
+    announce: bool = False,
+) -> list[Mapping[str, Any]]:
+    """File list for matching: packed releases are replaced by 7z member lists.
+
+    The raw qBittorrent list must still be used for ``candidate_record`` (it
+    decides whether RAR/ISO processing is pending), so callers keep both.
+    """
+
+    expanded, note = expand_archive_manifest(torrent, files)
+    if announce:
+        if note.get("expanded"):
+            print(
+                f"  Archívum-manifest: {note['entries']} fájl "
+                f"({note['archives']} archívum, 7z lista)"
+            )
+        elif note.get("reason") != "no_archive":
+            print(
+                "  Archívum-lista nem használható "
+                f"({note.get('reason')}); a qB fájllista marad."
+            )
+    return expanded
+
+
 def scan_completed(
     qb: QbitClient,
     tmdb: TmdbClient,
@@ -4292,7 +4323,8 @@ def scan_completed(
             # catalog resolvers and HTTP are forbidden on this path.
             files = qb.files(str(primary.get("hash") or ""))
             preflight_files[key] = files
-            parsed = enrich_release(parsed, name, primary, files)
+            match_files = _manifest_files(primary, files)
+            parsed = enrich_release(parsed, name, primary, match_files)
             blocked, blocked_group, rule, release_type = is_blacklisted_release(
                 name, parsed
             )
@@ -4312,7 +4344,7 @@ def scan_completed(
                     previous_decision=previous,
                 )
                 continue
-            if classify_local_payload(primary, files) == "NOT_MEDIA":
+            if classify_local_payload(primary, match_files) == "NOT_MEDIA":
                 record_terminal(
                     store,
                     key,
@@ -4372,7 +4404,9 @@ def scan_completed(
             # No title resolver, provider client, or Aither client is involved.
             files = qb.files(str(primary.get("hash") or ""))
             preflight_files[key] = files
-            parsed = enrich_release(parsed, name, primary, files)
+            parsed = enrich_release(
+                parsed, name, primary, _manifest_files(primary, files)
+            )
             blocked, blocked_group, rule, release_type = is_blacklisted_release(
                 name, parsed
             )
@@ -4477,7 +4511,8 @@ def scan_completed(
         # identity recheck path below.
         files = qb.files(str(primary.get("hash") or ""))
         preflight_files[key] = files
-        parsed = enrich_release(parsed, name, primary, files)
+        match_files = _manifest_files(primary, files)
+        parsed = enrich_release(parsed, name, primary, match_files)
         blocked, blocked_group, rule, release_type = is_blacklisted_release(
             name, parsed
         )
@@ -4497,7 +4532,7 @@ def scan_completed(
                 previous_decision=previous,
             )
             continue
-        if classify_local_payload(primary, files) == "NOT_MEDIA":
+        if classify_local_payload(primary, match_files) == "NOT_MEDIA":
             record_terminal(
                 store,
                 key,
@@ -4605,7 +4640,12 @@ def scan_completed(
             files = preflight_files.get(key)
             if files is None:
                 files = qb.files(str(primary.get("hash") or ""))
-            parsed = enrich_release(parsed, name, primary, files)
+            # A packed release (RAR volumes / one ISO) hides its real file
+            # list from qBittorrent.  Match on a read-only 7z member listing so
+            # the manifest comparison sees the content, not the packing; the
+            # raw ``files`` stay authoritative for RAR/ISO processing state.
+            match_files = _manifest_files(primary, files, announce=True)
+            parsed = enrich_release(parsed, name, primary, match_files)
 
             if _group_is_from_aither(qb, group):
                 outcome = CheckOutcome(
@@ -4626,7 +4666,7 @@ def scan_completed(
                 print("  Eredmény: DUPLICATE (source_tracker)")
                 continue
 
-            manifest_status = classify_local_payload(primary, files)
+            manifest_status = classify_local_payload(primary, match_files)
             if manifest_status == "NOT_MEDIA":
                 outcome = CheckOutcome(
                     status="NOT_MEDIA",
@@ -4713,7 +4753,7 @@ def scan_completed(
             outcome = check_release(
                 parsed,
                 primary,
-                files,
+                match_files,
                 tmdb,
                 aither,
                 imdb=imdb,

@@ -1785,6 +1785,80 @@ class TechnicalMatchingTests(unittest.TestCase):
 
         self.assertIs(technical_decision(local, remote), TechnicalDecision.MATCH)
 
+    def test_identical_av_core_with_different_authoring_is_indeterminate(self):
+        core = [
+            ("BDMV/STREAM/00001.m2ts", 1000),
+            ("BDMV/PLAYLIST/00001.mpls", 50),
+            ("BDMV/CLIPINF/00001.clpi", 40),
+        ]
+        local = self.disc(
+            "Film.2024.COMPLETE.BLURAY-LOCAL",
+            files=[{"name": f"Local/{name}", "size": size} for name, size in core]
+            + [
+                {"name": "Local/BDMV/index.bdmv", "size": 10},
+                {"name": "Local/BDMV/JAR/00000.jar", "size": 200},
+                {"name": "Local/CERTIFICATE/id.bdmv", "size": 20},
+            ],
+        )
+        self.assertEqual(local["disc_stream_core_count"], 3)
+        remote = candidate(
+            "Film.2024.1080p.USA.Blu-ray.AVC-REMOTE",
+            release_type="Full Disc",
+            files=[{"name": name, "size": size} for name, size in core]
+            + [
+                {"name": "BDMV/index.bdmv", "size": 10},
+                {"name": "BDMV/JAR/00000.jar", "size": 250},
+                {"name": "CERTIFICATE/id.bdmv", "size": 20},
+                {"name": "CERTIFICATE/online.crt", "size": 1},
+                {"name": "CERTIFICATE/online.crl", "size": 1},
+                {"name": "CERTIFICATE/online.sig", "size": 1},
+            ],
+        )
+
+        self.assertIs(
+            technical_decision(local, remote), TechnicalDecision.INDETERMINATE
+        )
+
+    def test_different_av_core_is_still_no_match(self):
+        local = self.disc(
+            "Film.2024.COMPLETE.BLURAY-LOCAL",
+            files=[
+                {"name": "Local/BDMV/STREAM/00001.m2ts", "size": 1000},
+                {"name": "Local/BDMV/PLAYLIST/00001.mpls", "size": 50},
+                {"name": "Local/BDMV/index.bdmv", "size": 10},
+            ],
+        )
+        remote = candidate(
+            "Film.2024.1080p.USA.Blu-ray.AVC-REMOTE",
+            release_type="Full Disc",
+            files=[
+                {"name": "BDMV/STREAM/00001.m2ts", "size": 1001},
+                {"name": "BDMV/PLAYLIST/00001.mpls", "size": 50},
+                {"name": "BDMV/index.bdmv", "size": 10},
+                {"name": "BDMV/JAR/00000.jar", "size": 250},
+                {"name": "CERTIFICATE/online.crt", "size": 1},
+            ],
+        )
+
+        self.assertIs(technical_decision(local, remote), TechnicalDecision.NO_MATCH)
+
+    def test_stream_core_is_only_recorded_for_a_single_bdmv_disc(self):
+        multi = self.disc(
+            "Box.2024.COMPLETE.BLURAY-LOCAL",
+            files=[
+                {"name": "Box/Disc1/BDMV/STREAM/00001.m2ts", "size": 10},
+                {"name": "Box/Disc2/BDMV/STREAM/00001.m2ts", "size": 20},
+            ],
+        )
+        self.assertNotIn("disc_stream_core", multi)
+        plain = enrich_release(
+            parse_release("Film.2024.1080p.WEB.H264-GRP"),
+            "Film.2024.1080p.WEB.H264-GRP",
+            {},
+            [{"name": "film.mkv", "size": 5}],
+        )
+        self.assertNotIn("disc_stream_core", plain)
+
     def test_tiny_authored_manifest_change_is_indeterminate(self):
         local = self.disc(
             "Film.2024.COMPLETE.BLURAY-LOCAL",
@@ -2346,6 +2420,103 @@ class TechnicalMatchingTests(unittest.TestCase):
             "Switch.2024.1080p.BluRay.x264-GRP"
         )
         self.assertFalse(blacklisted)
+
+    @staticmethod
+    def _web_episode_candidates(rows):
+        """rows: (group, episode, size, internal) -> candidate dicts."""
+
+        result = []
+        for group, episode, size, internal in rows:
+            item = candidate(
+                f"Show S01E{episode:02d} 1080p AMZN WEB-DL DD+ 5.1 H.264-{group}",
+                resolution="1080p",
+                release_type="WEB-DL",
+                season_number=1,
+                episode_number=episode,
+                files=[{"name": f"Show.S01E{episode:02d}.mkv", "size": size}],
+            )
+            if internal is not None:
+                item["attributes"]["internal"] = internal
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _local_web_episode():
+        name = "Show.S01E02.1080p.WEB.H264-NEWGRP"
+        return enrich_release(
+            parse_release(name),
+            name,
+            {},
+            [{"name": "Show.S01E02.mkv", "size": 1_000}],
+        )
+
+    def _with_policy(self, value):
+        import os
+
+        previous = os.environ.pop("AITHER_WEB_POLICY", None)
+        if value is not None:
+            os.environ["AITHER_WEB_POLICY"] = value
+
+        def restore():
+            os.environ.pop("AITHER_WEB_POLICY", None)
+            if previous is not None:
+                os.environ["AITHER_WEB_POLICY"] = previous
+
+        self.addCleanup(restore)
+
+    def test_web_precedent_makes_another_groups_release_a_separate_one(self):
+        self._with_policy(None)  # default: precedent
+        rows = [
+            ("AAA", 1, 2_000, True),
+            ("BBB", 1, 2_001, False),
+            ("AAA", 2, 2_500, True),
+        ]
+        decision, matched = evaluate_candidates(
+            self._local_web_episode(), self._web_episode_candidates(rows)
+        )
+        self.assertIs(decision, TechnicalDecision.NO_MATCH)
+        self.assertIsNone(matched)
+
+    def test_web_precedent_needs_two_groups_on_the_same_episode(self):
+        self._with_policy(None)
+        rows = [("AAA", 1, 2_000, False), ("AAA", 2, 2_500, False)]
+        decision, _ = evaluate_candidates(
+            self._local_web_episode(), self._web_episode_candidates(rows)
+        )
+        self.assertIs(decision, TechnicalDecision.INDETERMINATE)
+
+    def test_internal_only_pairs_are_not_a_precedent(self):
+        self._with_policy(None)
+        rows = [("AAA", 1, 2_000, True), ("BBB", 1, 2_001, True), ("AAA", 2, 2_500, True)]
+        decision, _ = evaluate_candidates(
+            self._local_web_episode(), self._web_episode_candidates(rows)
+        )
+        self.assertIs(decision, TechnicalDecision.INDETERMINATE)
+
+    def test_unknown_internal_flag_still_counts_two_groups(self):
+        self._with_policy(None)
+        rows = [("AAA", 1, 2_000, None), ("BBB", 1, 2_001, None), ("AAA", 2, 2_500, None)]
+        decision, _ = evaluate_candidates(
+            self._local_web_episode(), self._web_episode_candidates(rows)
+        )
+        self.assertIs(decision, TechnicalDecision.NO_MATCH)
+
+    def test_strict_policy_ignores_precedent(self):
+        self._with_policy("strict")
+        rows = [("AAA", 1, 2_000, True), ("BBB", 1, 2_001, False), ("AAA", 2, 2_500, True)]
+        decision, _ = evaluate_candidates(
+            self._local_web_episode(), self._web_episode_candidates(rows)
+        )
+        self.assertIs(decision, TechnicalDecision.INDETERMINATE)
+
+    def test_byte_identical_web_release_is_still_a_duplicate_under_any_policy(self):
+        self._with_policy("distinct-group")
+        rows = [("NEWGRP", 2, 1_000, False), ("BBB", 1, 2_001, False), ("AAA", 1, 2_000, True)]
+        decision, matched = evaluate_candidates(
+            self._local_web_episode(), self._web_episode_candidates(rows)
+        )
+        self.assertIs(decision, TechnicalDecision.MATCH)
+        self.assertIn("NEWGRP", matched["attributes"]["name"])
 
     def test_distinct_group_web_policy_is_opt_in(self):
         import os

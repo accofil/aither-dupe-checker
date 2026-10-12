@@ -5820,5 +5820,63 @@ class TmdbSeasonEpisodeIdentityTests(unittest.TestCase):
         )
 
 
+class PackedReleaseScanTests(unittest.TestCase):
+    NAME = "Disc.2024.COMPLETE.BLURAY-GRP"
+
+    def _qbit(self):
+        name = self.NAME
+
+        class Qbit:
+            def torrents(inner, filter_name="all", hashes=None):
+                return [
+                    {
+                        "hash": "c" * 40,
+                        "name": name,
+                        "state": "stalledUP",
+                        "save_path": "/missing",
+                        "content_path": "/missing/" + name,
+                        "progress": 1,
+                    }
+                ]
+
+            def files(inner, torrent_hash):
+                return [
+                    {"name": f"{name}/disc.rar", "size": 100},
+                    {"name": f"{name}/disc.r00", "size": 100},
+                ]
+
+        return Qbit()
+
+    def test_matching_uses_the_archive_members_but_state_keeps_the_raw_volumes(self):
+        members = [
+            {"name": f"{self.NAME}/BDMV/index.bdmv", "size": 10},
+            {"name": f"{self.NAME}/BDMV/STREAM/00001.m2ts", "size": 1_000},
+        ]
+        note = {"expanded": True, "reason": "listed", "archives": 1, "entries": 2}
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "aither_check.expand_archive_manifest", return_value=(members, note)
+        ), mock.patch(
+            "aither_check.check_release",
+            return_value=CheckOutcome(
+                "NOT_FOUND",
+                reason="COMPLETE_QUERY_NO_MATCH",
+                proven_not_found=True,
+            ),
+        ) as checker:
+            root = Path(temporary)
+            store = StateStore(root / "state.json")
+            scan_completed(self._qbit(), object(), object(), store, root / "log")
+            record = store.get_release(norm_name(self.NAME))
+
+        self.assertEqual(checker.call_args.args[2], members)
+        self.assertEqual(record["status"], "NOT_FOUND")
+        self.assertEqual(record["parsed"]["disc_manifest_kind"], "BDMV")
+        self.assertEqual(record["candidate"]["media_kind"], "rar")
+        self.assertEqual(record["candidate"]["processing"]["status"], "PENDING")
+        self.assertIn(
+            f"{self.NAME}/disc.rar", record["candidate"]["file_names"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

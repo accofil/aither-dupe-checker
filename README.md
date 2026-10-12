@@ -121,11 +121,16 @@ teljes riportját `aither_report.tsv` néven a kész lista mellé menti.
 
 ## Beállítható viselkedés
 
-- `AITHER_WEB_POLICY=distinct-group` (a `~/.aithercheck.env`-ben, alapértelmezés:
-  `strict`): ha mindkét oldal WEB-DL/WEBRip, azonos felbontású, a release-csoport
-  eltér és a médiafájl bájtméretei is eltérnek, az Aither-jelölt nem dupe. Csak akkor
-  kapcsold be, ha a tracker szabályai engedik több csoport WEB-DL-jét ugyanarra az
-  epizódra. Alapból ezek `MANUAL` státuszt kapnak.
+- `AITHER_WEB_POLICY` (a `~/.aithercheck.env`-ben):
+  - `precedent` (alapértelmezés): egy másik csoport WEB-DL-je, eltérő bájtméretekkel,
+    csak akkor külön release, ha az Aither listája már mutat ugyanarra az epizódra
+    (vagy filmre) és felbontásra legalább két különböző csoport WEB-DL-jét, és ha a
+    tracker adja az `internal` jelzést, legalább az egyik nem internal feltöltő.
+    (Az internal csoportok megkerülhetik a dupe-szabályt, így az internal-only pár
+    semmit nem bizonyít.) Precedens nélkül `MANUAL` marad.
+  - `strict`: minden más csoportos WEB-DL `MANUAL`.
+  - `distinct-group`: mindig külön releasenek számít (precedens nélkül is).
+  A bájtra azonos fájlméretű, azonos csoportú release minden módban dupe.
 
 ## Azonosítás finomságai
 
@@ -138,6 +143,28 @@ teljes riportját `aither_report.tsv` néven a kész lista mellé menti.
   jelző nélkül) `BLACKLISTED` (`GAME:CONSOLE_SCENE`) státuszt kapnak.
 - Azonos release-csoport és bájtra azonos médiafájl-méretek esetén a `HYBRID`/`CUSTOM`
   cím-jelölő hiánya az Aither-címben nem akadályozza a dupe-felismerést.
+- **RAR/ISO manifest:** a becsomagolt release-ek (RAR-kötetek, ISO) valódi fájllistáját
+  a program a `7z l -slt` listájából olvassa (kicsomagolás és írás nélkül), és ezzel
+  vet össze az Aither full disc fájllistáival. Hiányzó kötet, titkosítás, túl nagy
+  vagy hibás lista, szimlink vagy időtúllépés esetén a qB fájllistája marad. A
+  RAR/ISO-feldolgozás állapotát (`PENDING`, `i/n/k`) továbbra is a nyers qB-lista
+  határozza meg. Az `AITHER_7Z` változóval más `7z` binárist is megadhatsz.
+  Ha a RAR egyetlen ISO-t tartalmaz (a scene `COMPLETE.BLURAY` kiadások többsége), a
+  belső BDMV-lista csak kicsomagolás után látható; ilyenkor az ISO pontos mérete az
+  egyetlen helyi bizonyíték, ami önmagában nem dönt dupe-ról (`MANUAL`).
+- **Azonos A/V mag, eltérő authoring:** ha a STREAM, PLAYLIST és CLIPINF fájlok neve és
+  mérete azonos az Aither lemezével, de a Java-menü, a metaadatok vagy a tanúsítványok
+  eltérnek, az eredmény `MANUAL` (és nem `NOT_FOUND`): ez valószínűleg ugyanannak a
+  lemeznek másik nyomata vagy újraszerkesztése.
+- A riportban az Aither-találat mellett látszik, ha az `internal` vagy `trumpable`
+  (a staff által lecserélhetőnek jelölt) torrentről van szó.
+
+## Megszűnt torrentek
+
+Ha egy RAR/ISO-ra váró release torrentje közben eltűnik a qBittorrentből (például a
+`qbit-rar-cleaner` kibontotta és eltávolította), a futás nem áll le: a program
+kiírja, hogy kihagyta, és semmit nem módosít az állapotban. Ha a torrent később
+visszakerül, a release újra felajánlásra kerül.
 
 ## Állományok
 

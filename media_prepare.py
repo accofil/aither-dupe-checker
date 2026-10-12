@@ -1783,9 +1783,18 @@ def _validate_plain_ready_records(
 
 
 def _hydrate_candidates_from_qbit(
-    state: Mapping[str, Any], qbit_client: Any, torrents: Sequence[Any]
+    state: Mapping[str, Any],
+    qbit_client: Any,
+    torrents: Sequence[Any],
+    vanished: list[str] | None = None,
 ) -> tuple[Candidate, ...]:
-    """Build runtime candidates while leaving the caller's state untouched."""
+    """Build runtime candidates while leaving the caller's state untouched.
+
+    A candidate whose torrent is no longer in qBittorrent (for example after
+    the RAR/ISO cleaner removed it, or the operator deleted it) is skipped and,
+    when ``vanished`` is given, its key is appended.  Nothing is persisted, so
+    the candidate is offered again automatically if the torrent comes back.
+    """
 
     releases = state.get("releases", {})
     if not isinstance(releases, Mapping):
@@ -1821,7 +1830,9 @@ def _hydrate_candidates_from_qbit(
             raise ValueError(f"Candidate has no torrent hash: {key}")
         live = [live_by_hash[item] for item in hashes if item in live_by_hash]
         if len(live) != len(set(hashes)):
-            raise OwnershipError(f"Candidate torrent is no longer in qBittorrent: {key}")
+            if vanished is not None:
+                vanished.append(str(runtime.get("name") or key))
+            continue
         primary = live[0]
         runtime.setdefault("key", str(key))
         runtime.setdefault("hashes", list(hashes))
@@ -2015,7 +2026,15 @@ def review_and_process(
     latest_state = state
     try:
         torrents = _all_qbit_torrents(qbit_client)
-        candidates = _hydrate_candidates_from_qbit(state, qbit_client, torrents)
+        vanished: list[str] = []
+        candidates = _hydrate_candidates_from_qbit(
+            state, qbit_client, torrents, vanished
+        )
+        for vanished_name in vanished:
+            output_func(
+                "Kihagyva: a torrent már nincs a qBittorrentben "
+                f"(kibontás vagy törlés után?): {vanished_name}"
+            )
         if not candidates:
             output_func("Nincs feldolgozásra váró release.")
             return ReviewSummary(False, 0, 0, 0, 0, ())

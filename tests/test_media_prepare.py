@@ -911,6 +911,37 @@ class AdapterAndOrchestrationTests(unittest.TestCase):
             )
             self.assertEqual(queued[0].running_hashes, ("abc",))
 
+    def test_candidate_whose_torrent_vanished_is_skipped_not_fatal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            save = Path(temporary)
+            store, qbit, _plain = self._high_level_fixture(save)
+            qbit._torrents.clear()
+            vanished = []
+            candidates = _hydrate_candidates_from_qbit(
+                store.snapshot(), qbit, qbit.torrents(), vanished
+            )
+            self.assertEqual(candidates, ())
+            self.assertEqual(len(vanished), 1)
+
+            messages = []
+            summary = review_and_process(
+                store,
+                qbit,
+                [save],
+                save / "up",
+                save / "ready.txt",
+                input_func=lambda _prompt: "q",
+                output_func=messages.append,
+                min_free_bytes=0,
+            )
+            self.assertFalse(summary.cancelled)
+            self.assertEqual(summary.reviewed, 0)
+            self.assertTrue(any("már nincs a qBittorrentben" in m for m in messages))
+            # nothing is persisted: the release stays pending if the torrent returns
+            self.assertEqual(
+                store.state["releases"]["release"]["processing"]["status"], "PENDING"
+            )
+
     @staticmethod
     def _plain_ready_state(root, content_path):
         return {

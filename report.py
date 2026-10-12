@@ -37,7 +37,14 @@ def _match_text(record: Mapping[str, Any]) -> str:
     if not name:
         return ""
     link = str(attrs.get("details_link") or "").split("?")[0]
+    flags = [
+        label
+        for key, label in (("internal", "internal"), ("trumpable", "trumpable"))
+        if attrs.get(key) is True
+    ]
     text = f"{name} [{attrs.get('type') or '?'} {_gib(attrs.get('size'))}]"
+    if flags:
+        text += " {" + ", ".join(flags) + "}"
     return f"{text} {link}".strip()
 
 

@@ -19,6 +19,8 @@ STATE = {
                     "type": "Remux",
                     "size": 2 * 1024**3,
                     "details_link": "https://aither.cc/torrents/1?x=y",
+                    "internal": True,
+                    "trumpable": True,
                 }
             },
         },
@@ -38,7 +40,7 @@ class ReportTests(unittest.TestCase):
 
     def test_verbose_table_shows_match_without_query_string(self):
         text = format_table(report_rows(STATE, needle="Moana"), verbose=True)
-        self.assertIn("Moana 2026 1080p REMUX-GRP [Remux 2.00 GiB]", text)
+        self.assertIn("Moana 2026 1080p REMUX-GRP [Remux 2.00 GiB] {internal, trumpable}", text)
         self.assertIn("https://aither.cc/torrents/1", text)
         self.assertNotIn("x=y", text)
 

@@ -598,6 +598,64 @@ def _manifest_details(
     return digest.hexdigest(), len(entries), total_size, main_size
 
 
+_STREAM_CORE_DIRECTORIES = frozenset({"stream", "playlist", "clipinf"})
+
+
+def _stream_core_fingerprint(
+    files: Sequence[Mapping[str, Any]],
+) -> tuple[str, int] | None:
+    """Fingerprint a Blu-ray's A/V core: STREAM, PLAYLIST and CLIPINF paths+sizes.
+
+    Two pressings that differ only in Java menus, metadata, certificates or
+    the BACKUP mirror share this value.  It is evidence of identical main
+    content, never of a duplicate on its own.
+    """
+
+    entries: list[tuple[str, int]] = []
+    has_stream = False
+    for item in files:
+        path = _manifest_path(_file_name(item), "BDMV")
+        size = _file_size(item)
+        if path is None or size is None:
+            continue
+        parts = path.split("/")
+        if len(parts) < 3 or parts[0] != "bdmv" or parts[1] not in _STREAM_CORE_DIRECTORIES:
+            continue
+        has_stream |= parts[1] == "stream"
+        entries.append((path, size))
+    if not has_stream:
+        return None
+    entries.sort()
+    digest = hashlib.sha256()
+    digest.update(b"stream-core-v1\0")
+    for path, size in entries:
+        digest.update(path.encode("utf-8", "surrogatepass"))
+        digest.update(b"\0")
+        digest.update(str(size).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest(), len(entries)
+
+
+def _single_bdmv_stream_core(
+    files: Sequence[Mapping[str, Any]],
+) -> tuple[str, int] | None:
+    groups = [group for group in _disc_file_groups(files) if group[0] == "BDMV"]
+    if len(groups) != 1:
+        return None
+    return _stream_core_fingerprint(groups[0][2])
+
+
+def _candidate_stream_cores(attrs: Mapping[str, Any]) -> frozenset[str]:
+    cores: set[str] = set()
+    for kind, _, members in _disc_file_groups(_candidate_file_sequence(attrs)):
+        if kind != "BDMV":
+            continue
+        core = _stream_core_fingerprint(members)
+        if core is not None:
+            cores.add(core[0])
+    return frozenset(cores)
+
+
 def _is_sample_file(name: str) -> bool:
     """Scene Sample/ folders and *-sample.* clips are not upload payload."""
 
@@ -693,6 +751,13 @@ def enrich_release(
             else:
                 result.pop("disc_manifest_fingerprint", None)
                 result.pop("disc_manifest_version", None)
+            stream_core = _single_bdmv_stream_core(files) if kind == "BDMV" else None
+            if stream_core is not None:
+                result["disc_stream_core"] = stream_core[0]
+                result["disc_stream_core_count"] = stream_core[1]
+            else:
+                result.pop("disc_stream_core", None)
+                result.pop("disc_stream_core_count", None)
 
     file_total = sum(
         size for item in files if (size := _file_size(item)) is not None
@@ -2287,13 +2352,69 @@ def _exact_group_payload_match(
     )
 
 
-def web_distinct_group_policy_enabled() -> bool:
-    """Operator opt-in: AITHER_WEB_POLICY=distinct-group (default: strict)."""
+def web_policy() -> str:
+    """AITHER_WEB_POLICY: ``strict`` | ``precedent`` (default) | ``distinct-group``.
 
-    return os.environ.get("AITHER_WEB_POLICY", "strict").strip().casefold() in {
-        "distinct-group",
-        "distinct_group",
-    }
+    ``strict`` keeps every WEB-DL from another group MANUAL.  ``precedent``
+    treats it as a separate release only when the tracker's own listing already
+    shows parallel WEB-DLs of the same episode and resolution from different
+    groups.  ``distinct-group`` does so unconditionally.
+    """
+
+    value = os.environ.get("AITHER_WEB_POLICY", "precedent").strip().casefold()
+    value = value.replace("_", "-")
+    return value if value in {"strict", "precedent", "distinct-group"} else "precedent"
+
+
+def _web_parallel_precedent(
+    parsed: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]]
+) -> bool:
+    """True when the listing shows different groups' WEB-DLs side by side.
+
+    Same resolution and the same single episode (or the same movie), at least
+    two release groups.  When the tracker exposes the ``internal`` flag at
+    least one of those releases must come from a regular uploader: internal
+    groups may bypass the dupe rules, so internal-only pairs prove nothing.
+    """
+
+    local_resolution = _normalize_resolution(parsed.get("resolution"))
+    if not local_resolution:
+        return False
+    scopes: dict[tuple[Any, tuple[int, ...]], dict[str, set[Any]]] = {}
+    for candidate in candidates:
+        attrs = _candidate_attributes(candidate)
+        name = str(attrs.get("name") or "")
+        if not name:
+            continue
+        raw_remote = parse_release(name)
+        remote, conflict = _merge_remote_episode_evidence(attrs, raw_remote)
+        if conflict or remote.get("scope") in {"season_pack", "multi_episode"}:
+            continue
+        structured_type, _ = _candidate_release_type(attrs)
+        remote_type = structured_type or _normalize_release_type(
+            remote.get("release_type")
+        )
+        if remote_type not in {"WEB-DL", "WEBRip"}:
+            continue
+        if _candidate_resolution(attrs, remote) != local_resolution:
+            continue
+        group = extract_release_group(name).casefold()
+        if not group:
+            continue
+        scope = (remote.get("season"), tuple(remote.get("episodes") or ()))
+        scopes.setdefault(scope, {}).setdefault(group, set()).add(attrs.get("internal"))
+    for groups in scopes.values():
+        if len(groups) < 2:
+            continue
+        known = [
+            flag
+            for flags in groups.values()
+            for flag in flags
+            if isinstance(flag, bool)
+        ]
+        if not known or any(flag is False for flag in known):
+            return True
+    return False
 
 
 def _distinct_web_release(
@@ -2304,17 +2425,18 @@ def _distinct_web_release(
     remote_type: str | None,
     local_resolution: str | None,
     remote_resolution: str | None,
+    web_precedent: bool | None = None,
 ) -> bool:
     """WEB-DL from another group with different bytes is a separate release.
 
-    Applies only when the operator opted in, both sides are WEB-DL/WEBRip of
-    the same known resolution, both release groups are known and different,
-    and both byte-exact payload vectors are known and different.  The
-    tracker's own catalogue showing several groups' WEB-DLs for one
-    service/resolution is what justifies the opt-in; it is never the default.
+    Applies when the policy allows it (``distinct-group`` always, ``precedent``
+    only with a proven parallel-release precedent), both sides are
+    WEB-DL/WEBRip of the same known resolution, both release groups are known
+    and different, and both byte-exact payload vectors are known and different.
     """
 
-    if not web_distinct_group_policy_enabled():
+    policy = web_policy()
+    if policy == "strict" or (policy == "precedent" and not web_precedent):
         return False
     if local_type not in {"WEB-DL", "WEBRip"} or local_type != remote_type:
         return False
@@ -2743,6 +2865,11 @@ def _full_disc_decision(
                 parsed, remote_manifest_evidence
             ):
                 return TechnicalDecision.INDETERMINATE
+            local_core = str(parsed.get("disc_stream_core") or "").casefold()
+            if local_core and local_core in _candidate_stream_cores(attrs):
+                # Same STREAM/PLAYLIST/CLIPINF bytes, different Java/metadata:
+                # most likely another pressing or re-authoring of one disc.
+                return TechnicalDecision.INDETERMINATE
             return TechnicalDecision.NO_MATCH
 
     size_relation = _size_relation(_disc_total_size(parsed), _remote_disc_size(attrs))
@@ -2815,7 +2942,10 @@ def _full_disc_decision(
 
 
 def technical_decision(
-    parsed: Mapping[str, Any], candidate: Mapping[str, Any]
+    parsed: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    web_precedent: bool | None = None,
 ) -> TechnicalDecision:
     """Classify one Aither candidate using a strict, three-state matcher."""
 
@@ -3074,6 +3204,7 @@ def technical_decision(
         remote_type=remote_type,
         local_resolution=local_resolution,
         remote_resolution=remote_resolution,
+        web_precedent=web_precedent,
     ):
         return TechnicalDecision.NO_MATCH
     return (
@@ -3089,8 +3220,13 @@ def evaluate_candidates(
     """Evaluate every candidate and return immediately only for a real match."""
 
     saw_indeterminate = False
+    web_precedent = (
+        _web_parallel_precedent(parsed, candidates)
+        if web_policy() == "precedent"
+        else None
+    )
     for candidate in candidates:
-        decision = technical_decision(parsed, candidate)
+        decision = technical_decision(parsed, candidate, web_precedent=web_precedent)
         if decision is TechnicalDecision.MATCH:
             return decision, candidate
         if decision is TechnicalDecision.INDETERMINATE:
