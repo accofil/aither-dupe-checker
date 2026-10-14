@@ -1859,6 +1859,41 @@ class TechnicalMatchingTests(unittest.TestCase):
         )
         self.assertNotIn("disc_stream_core", plain)
 
+    @staticmethod
+    def _two_disc_remote(first_size, second_size):
+        return candidate(
+            "Show.S02.1080p.Blu-ray.AVC.DTS-HD.MA.5.1-REMOTE",
+            release_type="Full Disc",
+            resolution=None,
+            files=[
+                {"name": "Show.S02D01/BDMV/index.bdmv", "size": 10},
+                {"name": "Show.S02D01/BDMV/STREAM/00001.m2ts", "size": first_size},
+                {"name": "Show.S02D02/BDMV/index.bdmv", "size": 10},
+                {"name": "Show.S02D02/BDMV/STREAM/00001.m2ts", "size": second_size},
+            ],
+        )
+
+    def test_opaque_iso_matching_one_disc_of_a_multi_disc_torrent_is_indeterminate(self):
+        local = self.disc(
+            "Show.S02D02.COMPLETE.BLURAY-LOCAL",
+            files=[{"name": "Show.S02D02.COMPLETE.BLURAY-LOCAL/disc2.iso", "size": 44_100_000_000}],
+        )
+        self.assertEqual(local["disc_manifest_kind"], "ISO")
+        remote = self._two_disc_remote(43_700_000_000, 44_000_000_000)
+
+        self.assertIs(
+            technical_decision(local, remote), TechnicalDecision.INDETERMINATE
+        )
+
+    def test_opaque_iso_far_from_every_remote_disc_is_no_match(self):
+        local = self.disc(
+            "Show.S02D02.COMPLETE.BLURAY-LOCAL",
+            files=[{"name": "Show.S02D02.COMPLETE.BLURAY-LOCAL/disc2.iso", "size": 44_100_000_000}],
+        )
+        remote = self._two_disc_remote(20_000_000_000, 21_000_000_000)
+
+        self.assertIs(technical_decision(local, remote), TechnicalDecision.NO_MATCH)
+
     def test_tiny_authored_manifest_change_is_indeterminate(self):
         local = self.disc(
             "Film.2024.COMPLETE.BLURAY-LOCAL",

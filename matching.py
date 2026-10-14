@@ -60,6 +60,21 @@ BLACKLIST_NO_TYPE_GIVEN = {
 }
 
 
+def apply_banned_groups(groups: Any) -> None:
+    """Replace the static snapshot with a fresh Aither list (in place).
+
+    ``groups`` is a ``banned_groups.BannedGroups``.  The module-level sets are
+    mutated rather than rebound so every existing reference keeps working.
+    """
+
+    BLACKLIST_ALL.clear()
+    BLACKLIST_ALL.update(groups.all_types)
+    BLACKLIST_NO_TYPE_GIVEN.clear()
+    BLACKLIST_NO_TYPE_GIVEN.update(groups.no_type_given)
+    BLACKLIST_BY_TYPE.clear()
+    BLACKLIST_BY_TYPE.update({name: set(types) for name, types in groups.by_type.items()})
+
+
 _ADULT_SITE_PATTERNS = (
     (
         "5KPORN",
@@ -2638,6 +2653,38 @@ def _size_relation(local: int | None, remote: int | None) -> str:
     return "uncertain"
 
 
+def _opaque_iso_size_fits_remote(
+    local_evidence: Sequence[_ManifestEvidence],
+    remote_evidence: Sequence[_ManifestEvidence],
+) -> bool:
+    """Could an opaque ISO be a disc (or the whole set) of the remote torrent?
+
+    The inside of an ISO is unknown, so its disc cannot be proven different
+    from a remote disc whose size it matches.  An ISO is slightly larger than
+    the disc payload (UDF metadata), and a multi-disc torrent holds several
+    discs: compare the image with every remote disc root and with their sum.
+    """
+
+    iso_sizes = [
+        payload
+        for _, _, _, payload, _, kind in local_evidence
+        if kind == "ISO" and payload
+    ]
+    remote_sizes = [
+        payload
+        for _, _, _, payload, _, kind in remote_evidence
+        if kind in {"BDMV", "VIDEO_TS", "ISO"} and payload
+    ]
+    if not iso_sizes or not remote_sizes:
+        return False
+    candidates = [*remote_sizes, sum(remote_sizes)]
+    return any(
+        _size_relation(local, remote) != "different"
+        for local in iso_sizes
+        for remote in candidates
+    )
+
+
 def _near_manifest_variant(
     parsed: Mapping[str, Any],
     evidence: Sequence[_ManifestEvidence],
@@ -2869,6 +2916,13 @@ def _full_disc_decision(
             if local_core and local_core in _candidate_stream_cores(attrs):
                 # Same STREAM/PLAYLIST/CLIPINF bytes, different Java/metadata:
                 # most likely another pressing or re-authoring of one disc.
+                return TechnicalDecision.INDETERMINATE
+            if opaque_iso and _opaque_iso_size_fits_remote(
+                local_manifest_evidence, remote_manifest_evidence
+            ):
+                # An image whose inside is unknown cannot be proven different
+                # from a remote disc of the same size (or from one disc of a
+                # multi-disc torrent).
                 return TechnicalDecision.INDETERMINATE
             return TechnicalDecision.NO_MATCH
 

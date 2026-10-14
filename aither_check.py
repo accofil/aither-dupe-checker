@@ -29,9 +29,12 @@ from urllib.parse import urlsplit
 import requests
 
 from archive_manifest import expand_archive_manifest
+from banned_groups import load_banned_groups
+from lint import lint_many, lint_release
 from report import ATTENTION, format_table, report_rows, write_tsv
 from matching import (
     TechnicalDecision,
+    apply_banned_groups,
     _audio_evidence,
     _audio_profile_evidence,
     _structured_edition_evidence,
@@ -104,6 +107,10 @@ class QbitError(CheckerError):
     pass
 
 
+class QbitTorrentGoneError(QbitError):
+    """The torrent vanished from qBittorrent between listing and inspection."""
+
+
 @dataclass(frozen=True)
 class Config:
     qb_url: str
@@ -124,6 +131,10 @@ class Config:
     batch_pause: float = 30.0
     request_timeout: float = 30.0
     lock_file: Path = Path.home() / ".aithercheck.lock"
+    banned_groups_file: Path = (
+        Path.home() / ".cache" / "aither-dupe-checker" / "aither_banned_groups.json"
+    )
+    sync_banned_groups: bool = True
     identity_overrides_file: Path = Path(__file__).resolve().with_name(
         "identity_overrides.json"
     )
@@ -189,6 +200,19 @@ class Config:
                     str(Path(__file__).resolve().with_name("identity_overrides.json")),
                 )
             ).expanduser(),
+            banned_groups_file=Path(
+                os.getenv(
+                    "BANNED_GROUPS_FILE",
+                    str(
+                        Path.home()
+                        / ".cache"
+                        / "aither-dupe-checker"
+                        / "aither_banned_groups.json"
+                    ),
+                )
+            ).expanduser(),
+            sync_banned_groups=os.getenv("AITHER_BANNED_SYNC", "1").strip().casefold()
+            not in {"0", "false", "off", "no"},
             request_interval=nonnegative_float("AITHER_REQUEST_INTERVAL", "5"),
             batch_pause=nonnegative_float("AITHER_BATCH_PAUSE", "30"),
             request_timeout=nonnegative_float("AITHER_REQUEST_TIMEOUT", "30"),
@@ -281,6 +305,8 @@ class QbitClient:
             )
         except requests.RequestException:
             raise QbitError("qBittorrent fájllista-hálózati hiba") from None
+        if response.status_code == 404:
+            raise QbitTorrentGoneError("A torrent már nincs a qBittorrentben (HTTP 404)")
         if response.status_code != 200:
             raise QbitError(
                 f"qBittorrent fájllista-hiba: HTTP {response.status_code}"
@@ -304,6 +330,8 @@ class QbitClient:
             )
         except requests.RequestException:
             raise QbitError("qBittorrent tulajdonság-hálózati hiba") from None
+        if response.status_code == 404:
+            raise QbitTorrentGoneError("A torrent már nincs a qBittorrentben (HTTP 404)")
         if response.status_code != 200:
             raise QbitError(
                 f"qBittorrent tulajdonság-hiba: HTTP {response.status_code}"
@@ -327,6 +355,8 @@ class QbitClient:
             )
         except requests.RequestException:
             raise QbitError("qBittorrent trackerlista-hálózati hiba") from None
+        if response.status_code == 404:
+            raise QbitTorrentGoneError("A torrent már nincs a qBittorrentben (HTTP 404)")
         if response.status_code != 200:
             raise QbitError(
                 f"qBittorrent trackerlista-hiba: HTTP {response.status_code}"
@@ -2464,10 +2494,13 @@ def _group_is_from_aither(
             continue
         details: Mapping[str, Any] = {}
         trackers: Sequence[Mapping[str, Any] | str] = ()
-        if callable(properties):
-            details = properties(torrent_hash)
-        if callable(tracker_reader):
-            trackers = tracker_reader(torrent_hash)
+        try:
+            if callable(properties):
+                details = properties(torrent_hash)
+            if callable(tracker_reader):
+                trackers = tracker_reader(torrent_hash)
+        except QbitTorrentGoneError:
+            continue
         probe = {
             "tracker": torrent.get("tracker") or details.get("tracker"),
             "comment": torrent.get("comment") or details.get("comment"),
@@ -4091,8 +4124,30 @@ class ScanSummary:
     not_media: int = 0
     recheck_required: int = 0
     errors: int = 0
+    gone: int = 0
+    unchecked_after_abort: int = 0
     state_counts: dict[str, int] = field(default_factory=dict)
     live_keys: tuple[str, ...] = ()
+
+
+def _files_or_gone(
+    qb: QbitClient,
+    torrent: Mapping[str, Any],
+    log_file: Path,
+    name: str,
+) -> list[dict[str, Any]] | None:
+    """qB file list, or None when the torrent vanished (no state is touched)."""
+
+    try:
+        return qb.files(str(torrent.get("hash") or ""))
+    except QbitTorrentGoneError:
+        append_event(
+            log_file,
+            "SKIPPED_TORRENT_GONE",
+            name,
+            "A torrent közben eltűnt a qBittorrentből",
+        )
+        return None
 
 
 def _manifest_files(
@@ -4279,7 +4334,9 @@ def scan_completed(
             continue
 
         if _group_is_from_aither(qb, group):
-            files = qb.files(str(primary.get("hash") or ""))
+            files = _files_or_gone(qb, primary, log_file, name)
+            if files is None:
+                continue
             preflight_files[key] = files
             parsed = enrich_release(parsed, name, primary, files)
             if not (
@@ -4321,7 +4378,9 @@ def scan_completed(
             # any new Aither request.  Only the marker's persisted identity,
             # category and season may address the exact durable cache page;
             # catalog resolvers and HTTP are forbidden on this path.
-            files = qb.files(str(primary.get("hash") or ""))
+            files = _files_or_gone(qb, primary, log_file, name)
+            if files is None:
+                continue
             preflight_files[key] = files
             match_files = _manifest_files(primary, files)
             parsed = enrich_release(parsed, name, primary, match_files)
@@ -4402,7 +4461,9 @@ def scan_completed(
             # Re-run only the pure technical matcher against pages already
             # durably stored by this exact identity/category/season query.
             # No title resolver, provider client, or Aither client is involved.
-            files = qb.files(str(primary.get("hash") or ""))
+            files = _files_or_gone(qb, primary, log_file, name)
+            if files is None:
+                continue
             preflight_files[key] = files
             parsed = enrich_release(
                 parsed, name, primary, _manifest_files(primary, files)
@@ -4509,7 +4570,9 @@ def scan_completed(
 
         # Only a proven pre-Aither UNRESOLVED decision can reach the automatic
         # identity recheck path below.
-        files = qb.files(str(primary.get("hash") or ""))
+        files = _files_or_gone(qb, primary, log_file, name)
+        if files is None:
+            continue
         preflight_files[key] = files
         match_files = _manifest_files(primary, files)
         parsed = enrich_release(parsed, name, primary, match_files)
@@ -4767,6 +4830,18 @@ def scan_completed(
                 and str(current.get("status") or "").upper()
                 == "AITHER_ATTEMPTED"
             )
+            if isinstance(exc, QbitTorrentGoneError) and not spent_aither_request:
+                # The torrent was removed while the scan was running (relay,
+                # cleaner, operator).  Nothing was spent: skip it and go on.
+                append_event(
+                    log_file,
+                    "SKIPPED_TORRENT_GONE",
+                    name,
+                    "A torrent közben eltűnt a qBittorrentből",
+                )
+                summary.gone += 1
+                print("  Kihagyva: a torrent közben eltűnt a qBittorrentből")
+                continue
             if spent_aither_request:
                 # Once an Aither request was actually attempted, even a 429 or
                 # network/schema error is terminal under the no-repeat
@@ -4797,6 +4872,7 @@ def scan_completed(
                 append_event(log_file, "PRE_SEARCH_ERROR", name, str(exc))
             summary.errors += 1
             print(f"  HIBA: {exc}")
+            summary.unchecked_after_abort = len(groups) - index
             # Stop immediately so an outage cannot consume or terminalize the backlog.
             break
 
@@ -4867,6 +4943,34 @@ def run_media_review(
     )
 
 
+def collect_lint_findings(
+    snapshot: Mapping[str, Any],
+    keys: Iterable[str],
+    *,
+    runner: Callable[[Path], Any] | None = None,
+) -> dict[str, list[Any]]:
+    """Pre-upload warnings for NOT_FOUND releases that are ready for upload."""
+
+    releases = snapshot.get("releases")
+    releases = releases if isinstance(releases, Mapping) else {}
+    items: list[tuple[str, Path, str | None]] = []
+    for key in keys:
+        record = releases.get(key)
+        if not isinstance(record, Mapping) or record.get("status") != "NOT_FOUND":
+            continue
+        processing = record.get("processing")
+        processing = processing if isinstance(processing, Mapping) else {}
+        if str(processing.get("status") or "").upper() != "READY":
+            continue
+        release_type = (record.get("parsed") or {}).get("release_type")
+        paths = [processing.get("ready_path"), *(processing.get("ready_paths") or ())]
+        for raw in dict.fromkeys(str(p) for p in paths if p):
+            items.append((str(record.get("name") or key), Path(raw), release_type))
+    if runner is None:
+        return lint_many(items)
+    return lint_many(items, runner=runner)
+
+
 def print_summary(summary: ScanSummary, store: StateStore, ready_file: Path) -> None:
     counts = summary.state_counts
 
@@ -4884,6 +4988,13 @@ def print_summary(summary: ScanSummary, store: StateStore, ready_file: Path) -> 
     print(f"nem média: {count('NOT_MEDIA')}")
     print(f"újraellenőrzésre vár: {count('RECHECK_REQUIRED')}")
     print(f"hiba: {count('API_ERROR', 'ERROR', 'AITHER_ATTEMPTED')}")
+    if summary.gone:
+        print(f"futás közben eltűnt torrent (kihagyva): {summary.gone}")
+    if summary.unchecked_after_abort:
+        print(
+            "FIGYELEM: a futás hiba miatt megszakadt, még nem ellenőrzött "
+            f"release-csoport: {summary.unchecked_after_abort} (új futtatás folytatja)"
+        )
     pending = sum(
         1
         for key in summary.live_keys
@@ -4898,7 +5009,8 @@ def print_summary(summary: ScanSummary, store: StateStore, ready_file: Path) -> 
     print(f"kész lista: {ready_file}")
 
     snapshot = store.snapshot()
-    live_rows = report_rows(snapshot, only_keys=summary.live_keys)
+    lint_findings = collect_lint_findings(snapshot, summary.live_keys)
+    live_rows = report_rows(snapshot, only_keys=summary.live_keys, lint=lint_findings)
     report_path = ready_file.with_name("aither_report.tsv")
     try:
         write_tsv(live_rows, report_path)
@@ -4909,19 +5021,73 @@ def print_summary(summary: ScanSummary, store: StateStore, ready_file: Path) -> 
     if attention:
         print("\n=== Figyelmet igénylő tételek (részletek: aither --explain) ===")
         print(format_table(attention))
+    if lint_findings:
+        print("\n=== Feltöltés előtti figyelmeztetések (Aither-elutasítás kockázata) ===")
+        for lint_name, findings in lint_findings.items():
+            print(lint_name)
+            for finding in findings:
+                print(f"    {finding.message}")
+
+
+def sync_remote_banned_groups(config: Config) -> str:
+    """Replace the static blacklist with Aither's current list when available."""
+
+    if not config.sync_banned_groups:
+        return "disabled"
+    banned, source = load_banned_groups(
+        config.banned_groups_file, config.aither_base, config.aither_token
+    )
+    if banned is None:
+        print(
+            "FIGYELEM: az Aither tiltott-csoport lista nem érhető el; "
+            "a beépített (régebbi) lista marad érvényben."
+        )
+        return "static"
+    apply_banned_groups(banned)
+    print(f"Tiltott csoportok: {banned.size} (Aither lista, forrás: {source})")
+    return source
+
+
+def run_lint_command(paths: Sequence[str], config: Config) -> int:
+    """aither --lint [path ...]: read-only MediaInfo lint (no qB/Aither/state)."""
+
+    targets = [Path(item).expanduser() for item in paths]
+    if not targets:
+        try:
+            lines = config.ready_list_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        targets = [Path(line.strip()) for line in lines if line.strip()]
+    if not targets:
+        print("Nincs vizsgálandó útvonal (üres kész lista).")
+        return 0
+    problems = 0
+    for target in targets:
+        release_type = parse_release(target.name).get("release_type")
+        findings = lint_release(target, release_type)
+        if findings:
+            problems += 1
+            print(target.name)
+            for finding in findings:
+                print(f"    {finding.message}")
+    print(f"\n{len(targets)} útvonal vizsgálva, {problems} figyelmeztetéssel.")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     report_mode = False
+    lint_mode = False
     needle = ""
     if argv:
         if argv[0] in {"--explain", "--report"}:
             report_mode = True
             needle = " ".join(argv[1:])
+        elif argv[0] == "--lint":
+            lint_mode = True
         else:
             print(
-                "Használat: aither [--report | --explain [névrészlet]]",
+                "Használat: aither [--report | --explain [névrészlet] | --lint [útvonal ...]]",
                 file=sys.stderr,
             )
             return 2
@@ -4935,6 +5101,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         with SingleProcessLock(config.lock_file):
             # StateStore may migrate and atomically rewrite a legacy file in
             # its constructor, so the process lock must already be held.
+            if lint_mode:
+                return run_lint_command(argv[1:], config)
             store = StateStore(config.state_file)
             if report_mode:
                 rows = report_rows(store.snapshot(), needle=needle)
@@ -4947,6 +5115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             except IdentityOverrideError as exc:
                 raise ConfigurationError(str(exc)) from exc
+            sync_remote_banned_groups(config)
             rate_gate = AitherRateGate(
                 store,
                 batch_size=10,

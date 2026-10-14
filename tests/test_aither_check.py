@@ -21,6 +21,8 @@ from aither_check import (
     QUERY_POLICY_VERSION,
     ProviderError,
     QbitClient,
+    QbitError,
+    QbitTorrentGoneError,
     TmdbClient,
     _AITHER_EVIDENCE_FIELDS,
     _AITHER_VALIDATED_EVIDENCE_FIELDS,
@@ -5876,6 +5878,105 @@ class PackedReleaseScanTests(unittest.TestCase):
         self.assertIn(
             f"{self.NAME}/disc.rar", record["candidate"]["file_names"]
         )
+
+
+class VanishedTorrentScanTests(unittest.TestCase):
+    NAMES = (
+        "A.Film.2020.1080p.BluRay.x264-GRP",
+        "B.Film.2020.1080p.BluRay.x264-GRP",
+        "C.Film.2020.1080p.BluRay.x264-GRP",
+    )
+
+    def _qbit(self, gone_for=()):
+        names = self.NAMES
+
+        class Qbit:
+            def torrents(inner, filter_name="all", hashes=None):
+                return [
+                    {
+                        "hash": str(index) * 40,
+                        "name": name,
+                        "state": "stalledUP",
+                        "save_path": "/missing",
+                        "content_path": "/missing/" + name,
+                        "progress": 1,
+                    }
+                    for index, name in enumerate(names)
+                ]
+
+            def files(inner, torrent_hash):
+                if torrent_hash in gone_for:
+                    raise QbitTorrentGoneError("gone")
+                return [{"name": "Film/film.mkv", "size": 10}]
+
+        return Qbit()
+
+    def test_a_vanished_torrent_is_skipped_and_the_scan_continues(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "aither_check.check_release",
+            return_value=CheckOutcome("MANUAL", reason="TEST_ONLY"),
+        ):
+            root = Path(temporary)
+            store = StateStore(root / "state.json")
+            summary = scan_completed(
+                self._qbit(gone_for={"1" * 40}),
+                object(),
+                object(),
+                store,
+                root / "log",
+            )
+            first = store.get_release(norm_name(self.NAMES[0]))
+            gone = store.get_release(norm_name(self.NAMES[1]))
+            last = store.get_release(norm_name(self.NAMES[2]))
+            log_text = (root / "log").read_text(encoding="utf-8")
+
+        self.assertEqual(summary.gone, 1)
+        self.assertEqual(summary.errors, 0)
+        self.assertEqual(summary.unchecked_after_abort, 0)
+        self.assertEqual(first["status"], "MANUAL")
+        self.assertEqual(last["status"], "MANUAL")
+        self.assertIsNone(gone)
+        self.assertIn("SKIPPED_TORRENT_GONE", log_text)
+
+    def test_a_real_outage_still_stops_but_reports_the_unchecked_rest(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "aither_check.check_release", side_effect=ProviderError("tmdb down")
+        ):
+            root = Path(temporary)
+            store = StateStore(root / "state.json")
+            summary = scan_completed(
+                self._qbit(), object(), object(), store, root / "log"
+            )
+
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(summary.gone, 0)
+        self.assertEqual(summary.unchecked_after_abort, 2)
+
+    def test_http_404_from_qbittorrent_means_the_torrent_is_gone(self):
+        class Response:
+            def __init__(inner, status):
+                inner.status_code = status
+
+            def json(inner):
+                return []
+
+        class Session:
+            def __init__(inner, status):
+                inner.status = status
+
+            def get(inner, url, params=None, timeout=None):
+                return Response(inner.status)
+
+        for method in ("files", "trackers", "properties"):
+            with self.subTest(method=method):
+                client = QbitClient("http://127.0.0.1:1", "user", "pass")
+                client.session = Session(404)
+                with self.assertRaises(QbitTorrentGoneError):
+                    getattr(client, method)("a" * 40)
+                client.session = Session(500)
+                with self.assertRaises(QbitError) as caught:
+                    getattr(client, method)("a" * 40)
+                self.assertNotIsInstance(caught.exception, QbitTorrentGoneError)
 
 
 if __name__ == "__main__":

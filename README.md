@@ -156,8 +156,45 @@ teljes riportját `aither_report.tsv` néven a kész lista mellé menti.
   mérete azonos az Aither lemezével, de a Java-menü, a metaadatok vagy a tanúsítványok
   eltérnek, az eredmény `MANUAL` (és nem `NOT_FOUND`): ez valószínűleg ugyanannak a
   lemeznek másik nyomata vagy újraszerkesztése.
+- Ha a helyi release egyetlen ISO (vagy egyetlen ISO-t tartalmazó RAR), a program a
+  képfájl pontos méretét a távoli lemez(ek) méretével veti össze, külön-külön az
+  egyes lemez-gyökerekkel és az összegükkel is (többlemezes torrent egyik lemeze).
+  Ha a méret illeszkedik, az eredmény `MANUAL`, nem `NOT_FOUND`. Valós eset: a
+  `The.Night.Manager.S02D02` ISO-ja az Aither `S02` két lemezes torrentjének egyik
+  lemeze.
 - A riportban az Aither-találat mellett látszik, ha az `internal` vagy `trumpable`
   (a staff által lecserélhetőnek jelölt) torrentről van szó.
+
+## Feltöltés előtti lint
+
+```bash
+aither --lint                    # a kész lista minden útvonala
+aither --lint "/útvonal/film.mkv" # egy konkrét fájl vagy mappa
+```
+
+Az Aither staff nem csak dupe miatt utasít el feltöltést. A 2026-10-13-i HDH remuxot
+`redundant audio` indokkal utasították el: három angol hangsáv volt benne (TrueHD Atmos
+7.1, Dolby Digital 5.1 és DTS-HD MA 5.1, cím nélkül). A lint MediaInfóval (csak olvas)
+megnézi a kész listán lévő **remuxok** hangsávjait, és figyelmeztet, ha
+
+- egy `Compatibility Track` című hangsáv van a fő hangsáv mellett, vagy
+- egy nyelven több fő hangsáv van, és nem mindegyiknek van saját, érdemi címe.
+
+Nem számít redundánsnak: a commentary és az audio description, a címmel ellátott lossy
+extra (pl. felolvasás, interjú), és az alternatív keverések saját címmel (pl. `Original
+Mono Mix` és `5.1 Surround Remix`). A figyelmeztetés megjelenik a futás végén, az
+`aither_report.tsv` `lint` oszlopában és az `aither --report` táblázatban. A szabály az
+elutasításból és valós remuxok hangsáv-listájából következtetett heurisztika, nem a
+tracker szövege; a lint soha nem módosítja a döntést és a kész listát.
+
+## Tiltott csoportok
+
+A tiltott release-csoportok listáját a program az Aither saját API-járól tölti le
+(`/api/blacklists/releasegroups`, legfeljebb naponta egyszer, a gyorsítótár:
+`~/.cache/aither-dupe-checker/aither_banned_groups.json`, `0600`). Ha a letöltés nem
+sikerül, a régi gyorsítótár, végső soron a beépített (régebbi) lista marad érvényben, így
+egy kimaradás sosem gyengíti a szűrőt. Kikapcsolás: `AITHER_BANNED_SYNC=0`; másik hely:
+`BANNED_GROUPS_FILE`.
 
 ## Megszűnt torrentek
 
@@ -165,6 +202,11 @@ Ha egy RAR/ISO-ra váró release torrentje közben eltűnik a qBittorrentből (p
 `qbit-rar-cleaner` kibontotta és eltávolította), a futás nem áll le: a program
 kiírja, hogy kihagyta, és semmit nem módosít az állapotban. Ha a torrent később
 visszakerül, a release újra felajánlásra kerül.
+
+Ugyanez érvényes az ellenőrző körre: ha egy torrent a futás közben tűnik el a
+qBittorrentből (a qB `404`-et ad a fájllistára), a program kihagyja, és a többi release-t
+tovább ellenőrzi. Valódi szolgáltatás-kimaradásnál (TMDb, Aither) a futás továbbra is
+megáll, de az összesítő kiírja, hány release maradt ellenőrizetlenül.
 
 ## Állományok
 

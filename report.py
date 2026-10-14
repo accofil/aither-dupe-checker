@@ -17,7 +17,7 @@ STATUS_ORDER = (
     "BLACKLISTED",
 )
 ATTENTION = {"NOT_FOUND", "MANUAL", "UNRESOLVED", "RECHECK_REQUIRED"}
-COLUMNS = ("status", "reason", "name", "tmdb", "imdb", "aither_match", "message")
+COLUMNS = ("status", "reason", "name", "tmdb", "imdb", "aither_match", "message", "lint")
 
 
 def _gib(value: Any) -> str:
@@ -53,6 +53,7 @@ def report_rows(
     *,
     only_keys: Iterable[str] | None = None,
     needle: str = "",
+    lint: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[dict[str, str]]:
     releases = state.get("releases")
     releases = releases if isinstance(releases, Mapping) else {}
@@ -74,6 +75,9 @@ def report_rows(
                 "imdb": str(record.get("imdb_id") or ""),
                 "aither_match": _match_text(record),
                 "message": str(record.get("message") or ""),
+                "lint": "; ".join(
+                    str(getattr(item, "message", item)) for item in (lint or {}).get(name, ())
+                ),
             }
         )
 
@@ -96,7 +100,10 @@ def format_table(
         name = row["name"]
         if not verbose and len(name) > limit_name:
             name = name[: limit_name - 1] + "…"
-        lines.append(f"{row['status']:<11} {row['reason'][:34]:<34} {name}")
+        marker = "  [lint]" if row.get("lint") else ""
+        lines.append(f"{row['status']:<11} {row['reason'][:34]:<34} {name}{marker}")
+        if row.get("lint"):
+            lines.append(f"    lint: {row['lint']}")
         if verbose:
             if row["tmdb"] or row["imdb"]:
                 lines.append(f"    azonosító: tmdb={row['tmdb'] or '-'} imdb={row['imdb'] or '-'}")
